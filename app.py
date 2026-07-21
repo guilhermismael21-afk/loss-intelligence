@@ -249,28 +249,142 @@ def horizontal_bar(data, title, color):
         text="Quantidade",
         color_discrete_sequence=[color],
     )
-    fig.update_layout(height=430, margin=dict(l=10, r=20, t=55, b=20), showlegend=False)
-    fig.update_traces(textposition="outside")
+    fig.update_layout(
+        height=430,
+        margin=dict(l=10, r=20, t=55, b=20),
+        showlegend=False,
+        clickmode="event+select",
+        dragmode=False,
+    )
+    fig.update_traces(
+        textposition="outside",
+        selected_marker_opacity=1,
+        unselected_marker_opacity=0.35,
+        hovertemplate="<b>%{y}</b><br>Quantidade: %{x}<extra>Clique para detalhar</extra>",
+    )
     return fig
 
-with tab_exec:
-    c1, c2 = st.columns(2)
+def selected_category(event):
+    """Extract the clicked bar category from Streamlit's Plotly selection state."""
+    try:
+        points = event.selection.points
+        if points:
+            point = points[0]
+            return point.get("y") or point.get("x")
+    except Exception:
+        return None
+    return None
+
+def detail_panel(base_df, title, subtitle=""):
+    st.markdown(f"### {title}")
+    if subtitle:
+        st.caption(subtitle)
+
+    d1, d2, d3, d4 = st.columns(4)
+    d1.metric("Registros", len(base_df))
+    d2.metric(
+        "Áreas envolvidas",
+        base_df[COL["area"]].nunique() if COL["area"] else 0,
+    )
+    d3.metric(
+        "Responsáveis",
+        base_df[COL["owner"]].nunique() if COL["owner"] else 0,
+    )
+    d4.metric(
+        "Atrasadas",
+        int(base_df[COL["overdue"]].astype(str).str.upper().eq("SIM").sum())
+        if COL["overdue"] else 0,
+    )
+
+    c1, c2, c3 = st.columns(3)
     with c1:
         st.plotly_chart(
-            horizontal_bar(macro_counts, "Pareto de macrotemas", "#2166a5"),
+            horizontal_bar(counts(base_df, COL["theme"], 12), "Tipos específicos", "#d97706"),
             use_container_width=True,
+            key=f"detail_theme_{title}",
         )
     with c2:
         st.plotly_chart(
+            horizontal_bar(counts(base_df, COL["area"], 12), "Onde ocorreu", "#2e8b57"),
+            use_container_width=True,
+            key=f"detail_area_{title}",
+        )
+    with c3:
+        st.plotly_chart(
+            horizontal_bar(counts(base_df, COL["owner"], 12), "Quem abriu / responsável", "#7c3aed"),
+            use_container_width=True,
+            key=f"detail_owner_{title}",
+        )
+
+    if COL["created"]:
+        timeline = (
+            base_df.dropna(subset=[COL["created"]])
+            .assign(Mês=lambda x: x[COL["created"]].dt.to_period("M").astype(str))
+            .groupby("Mês")
+            .size()
+            .reset_index(name="Quantidade")
+        )
+        fig = px.line(
+            timeline,
+            x="Mês",
+            y="Quantidade",
+            markers=True,
+            title="Quando as ações foram abertas",
+        )
+        fig.update_layout(height=330, margin=dict(l=10, r=20, t=55, b=20))
+        st.plotly_chart(fig, use_container_width=True, key=f"detail_timeline_{title}")
+
+    display_cols = [
+        c for c in [
+            COL["id"], COL["created"], COL["target"], COL["area"], COL["macro"],
+            COL["theme"], COL["voice"], COL["title"], COL["description"],
+            COL["owner"], COL["status"], COL["priority"], COL["overdue"],
+            COL["exposure"], COL["reference"]
+        ] if c
+    ]
+    st.markdown("#### Ações individuais")
+    st.dataframe(
+        base_df[display_cols],
+        use_container_width=True,
+        hide_index=True,
+        height=500,
+    )
+    st.download_button(
+        "Baixar este detalhamento",
+        data=download_csv(base_df[display_cols]),
+        file_name=f"detalhamento_{title.lower().replace(' ', '_').replace('/', '_')}.csv",
+        mime="text/csv",
+        key=f"download_{title}",
+    )
+
+with tab_exec:
+    st.info("Clique em uma barra dos gráficos para abrir o detalhamento.")
+    c1, c2 = st.columns(2)
+    with c1:
+        macro_event = st.plotly_chart(
+            horizontal_bar(macro_counts, "Pareto de macrotemas", "#2166a5"),
+            use_container_width=True,
+            key="macro_select",
+            on_select="rerun",
+            selection_mode="points",
+        )
+    with c2:
+        area_event = st.plotly_chart(
             horizontal_bar(area_counts, "Concentração por área", "#2e8b57"),
             use_container_width=True,
+            key="area_select",
+            on_select="rerun",
+            selection_mode="points",
         )
 
     c3, c4 = st.columns(2)
     with c3:
-        st.plotly_chart(
+        theme_event = st.plotly_chart(
             horizontal_bar(theme_counts, "O que existe dentro dos temas", "#d97706"),
             use_container_width=True,
+            key="theme_select",
+            on_select="rerun",
+            selection_mode="points",
         )
     with c4:
         if COL["created"]:
@@ -286,6 +400,35 @@ with tab_exec:
             st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("Coluna de data de criação não encontrada.")
+
+    selected_macro = selected_category(macro_event)
+    selected_area = selected_category(area_event)
+    selected_theme = selected_category(theme_event)
+
+    if selected_macro and COL["macro"]:
+        detail_df = filtered[filtered[COL["macro"]].fillna("Não informado").astype(str) == str(selected_macro)]
+        st.markdown("---")
+        detail_panel(
+            detail_df,
+            f"Detalhamento: {selected_macro}",
+            "Macrotema selecionado no Pareto. Veja os tipos, locais, responsáveis, datas e ações.",
+        )
+    elif selected_area and COL["area"]:
+        detail_df = filtered[filtered[COL["area"]].fillna("Não informado").astype(str) == str(selected_area)]
+        st.markdown("---")
+        detail_panel(
+            detail_df,
+            f"Área: {selected_area}",
+            "Área selecionada no gráfico de concentração.",
+        )
+    elif selected_theme and COL["theme"]:
+        detail_df = filtered[filtered[COL["theme"]].fillna("Não informado").astype(str) == str(selected_theme)]
+        st.markdown("---")
+        detail_panel(
+            detail_df,
+            f"Tema: {selected_theme}",
+            "Tema específico selecionado.",
+        )
 
 with tab_voices:
     voice_counts = counts(filtered, COL["voice"], top=20)
@@ -313,22 +456,94 @@ with tab_nr:
             nr_mask |= filtered[col].fillna("").astype(str).str.contains(r"\bNR[\s-]?\d+", case=False, regex=True)
     nr_df = filtered[nr_mask]
     st.metric("Registros relacionados a NR", len(nr_df))
+    st.info("Clique em uma NR ou em um problema específico para abrir o detalhamento.")
     c1, c2 = st.columns(2)
-    c1.plotly_chart(horizontal_bar(counts(nr_df, COL["reference"]), "NR / referência", "#b91c1c"), use_container_width=True)
-    c2.plotly_chart(horizontal_bar(counts(nr_df, COL["theme"]), "Problema específico", "#d97706"), use_container_width=True)
-    st.dataframe(nr_df, use_container_width=True, hide_index=True, height=420)
+    with c1:
+        nr_ref_event = st.plotly_chart(
+            horizontal_bar(counts(nr_df, COL["reference"]), "NR / referência", "#b91c1c"),
+            use_container_width=True,
+            key="nr_ref_select",
+            on_select="rerun",
+            selection_mode="points",
+        )
+    with c2:
+        nr_theme_event = st.plotly_chart(
+            horizontal_bar(counts(nr_df, COL["theme"]), "Problema específico", "#d97706"),
+            use_container_width=True,
+            key="nr_theme_select",
+            on_select="rerun",
+            selection_mode="points",
+        )
+
+    nr_ref = selected_category(nr_ref_event)
+    nr_theme = selected_category(nr_theme_event)
+    if nr_ref and COL["reference"]:
+        selected_nr_df = nr_df[
+            nr_df[COL["reference"]].fillna("Não informado").astype(str) == str(nr_ref)
+        ]
+        detail_panel(selected_nr_df, f"NR: {nr_ref}", "Referência técnica selecionada.")
+    elif nr_theme and COL["theme"]:
+        selected_nr_df = nr_df[
+            nr_df[COL["theme"]].fillna("Não informado").astype(str) == str(nr_theme)
+        ]
+        detail_panel(selected_nr_df, f"Problema NR: {nr_theme}", "Problema específico selecionado.")
+    else:
+        st.dataframe(nr_df, use_container_width=True, hide_index=True, height=420)
 
 with tab_5s:
     five_mask = pd.Series(False, index=filtered.index)
     for col in [COL["macro"], COL["theme"], COL["title"], COL["description"], COL["voice"]]:
         if col:
-            five_mask |= filtered[col].fillna("").astype(str).str.contains("5S|organiza|limpeza|demarca|identifica|armazen", case=False, regex=True)
+            five_mask |= filtered[col].fillna("").astype(str).str.contains(
+                "5S|organiza|limpeza|demarca|identifica|armazen",
+                case=False,
+                regex=True,
+            )
     five_df = filtered[five_mask]
     st.metric("Registros relacionados a 5S", len(five_df))
+    st.info("Clique em um tipo de 5S ou em uma área para detalhar.")
     c1, c2 = st.columns(2)
-    c1.plotly_chart(horizontal_bar(counts(five_df, COL["theme"]), "Tipo de 5S", "#2e8b57"), use_container_width=True)
-    c2.plotly_chart(horizontal_bar(counts(five_df, COL["area"]), "Áreas com maior recorrência", "#2166a5"), use_container_width=True)
-    st.dataframe(five_df, use_container_width=True, hide_index=True, height=420)
+    with c1:
+        five_theme_event = st.plotly_chart(
+            horizontal_bar(counts(five_df, COL["theme"]), "Tipo de 5S", "#2e8b57"),
+            use_container_width=True,
+            key="five_theme_select",
+            on_select="rerun",
+            selection_mode="points",
+        )
+    with c2:
+        five_area_event = st.plotly_chart(
+            horizontal_bar(counts(five_df, COL["area"]), "Áreas com maior recorrência", "#2166a5"),
+            use_container_width=True,
+            key="five_area_select",
+            on_select="rerun",
+            selection_mode="points",
+        )
+
+    five_theme = selected_category(five_theme_event)
+    five_area = selected_category(five_area_event)
+
+    if five_theme and COL["theme"]:
+        selected_five_df = five_df[
+            five_df[COL["theme"]].fillna("Não informado").astype(str) == str(five_theme)
+        ]
+        detail_panel(
+            selected_five_df,
+            f"5S: {five_theme}",
+            "Tipo de 5S selecionado. O detalhamento mostra onde ocorreu, quem abriu e quando.",
+        )
+    elif five_area and COL["area"]:
+        selected_five_df = five_df[
+            five_df[COL["area"]].fillna("Não informado").astype(str) == str(five_area)
+        ]
+        detail_panel(
+            selected_five_df,
+            f"5S na área: {five_area}",
+            "Área selecionada dentro do universo de 5S.",
+        )
+    else:
+        st.markdown("#### Visão geral das ações de 5S")
+        st.dataframe(five_df, use_container_width=True, hide_index=True, height=420)
 
 with tab_people:
     if COL["owner"]:
